@@ -168,7 +168,8 @@ app.post('/api/admin/login', async (req, res) => {
     { expiresIn: '24h' }
   );
 
-  res.json({ success: true, data: { token }, message: 'Login realizado com sucesso' });
+  res.json({ success: true, token, data: { token }, message: "Login realizado com sucesso" });
+
 });
 
 // GET /api/admin/settings — credenciais PixVault
@@ -208,7 +209,7 @@ app.get('/api/admin/receipts', authMiddleware, async (req, res) => {
 // GET /api/admin/cpf-keys — listar chaves CPF
 app.get('/api/admin/cpf-keys', authMiddleware, async (req, res) => {
   const { data } = await supabase.from('cpf_api_keys').select('*');
-  res.json(data || []);
+  res.json({ keys: data || [] });
 });
 
 // POST /api/admin/cpf-keys — adicionar chave CPF
