@@ -40,6 +40,7 @@ function authMiddleware(req, res, next) {
 // ─── ENDPOINTS PÚBLICOS ─────────────────────────────────
 
 // POST /api/validate-cpf — consulta dados
+
 app.post('/api/validate-cpf', async (req, res) => {
   const { cpf } = req.body;
 
@@ -68,7 +69,7 @@ app.post('/api/validate-cpf', async (req, res) => {
       .maybeSingle();
 
     if (cacheError) {
-      console.error(cacheError);
+      console.error('Erro ao consultar cache:', cacheError);
 
       return res.status(500).json({
         success: false,
@@ -84,13 +85,16 @@ app.post('/api/validate-cpf', async (req, res) => {
         data: {
           cpf: cached.cpf,
           nome: cached.nome,
+
+          // Garante que o frontend receba YYYY-MM-DD
           dataNascimento: normalizarData(cached.data_nascimento),
+
           sexo: cached.genero
         }
       });
     }
 
-    // 2. Não tem cache: consulta API
+    // 2. Não tem cache → consulta API externa
     const data = await fetchCpfFromApi(normalizedCpf);
 
     if (!data) {
@@ -101,6 +105,7 @@ app.post('/api/validate-cpf', async (req, res) => {
     }
 
     // 3. Salva no cache
+    // data.dataNascimento já foi normalizada para YYYY-MM-DD
     const { error: saveError } = await supabase
       .from('cpf_cache')
       .upsert({
@@ -117,7 +122,7 @@ app.post('/api/validate-cpf', async (req, res) => {
       console.error('Erro ao salvar cache:', saveError);
     }
 
-    // 4. Retorna resultado da API
+    // 4. Retorna para o frontend
     return res.json({
       success: true,
       cached: false,
@@ -125,7 +130,7 @@ app.post('/api/validate-cpf', async (req, res) => {
     });
 
   } catch (error) {
-    console.error(error);
+    console.error('Erro interno:', error);
 
     return res.status(500).json({
       success: false,
@@ -135,22 +140,36 @@ app.post('/api/validate-cpf', async (req, res) => {
 });
 
 
+/**
+ * Converte:
+ *
+ * DD/MM/YYYY → YYYY-MM-DD
+ *
+ * O frontend espera YYYY-MM-DD porque
+ * a função Fv() faz:
+ *
+ * "1995-08-10" → "10/08/1995"
+ */
 function normalizarData(data) {
   if (!data) return null;
 
   const valor = String(data).trim();
 
-  // Já está em YYYY-MM-DD
+  // Já está no formato esperado pelo frontend
   if (/^\d{4}-\d{2}-\d{2}$/.test(valor)) {
     return valor;
   }
 
-  // API retorna DD/MM/YYYY
+  // API externa retorna DD/MM/YYYY
   if (/^\d{2}\/\d{2}\/\d{4}$/.test(valor)) {
     const [dia, mes, ano] = valor.split('/');
 
     return `${ano}-${mes}-${dia}`;
   }
+
+  // Se vier em algum formato inesperado,
+  // não tenta inventar uma conversão.
+  console.warn('Formato de data não reconhecido:', valor);
 
   return valor;
 }
@@ -166,17 +185,25 @@ async function fetchCpfFromApi(cpf) {
   try {
     const response = await fetch(process.env.CONSULTA_URL, {
       method: 'POST',
+
       headers: {
         'Content-Type': 'application/json'
       },
+
       body: JSON.stringify({
         module: 'cpf',
         query: cpf
       }),
+
       signal: controller.signal
     });
 
     if (!response.ok) {
+      console.error(
+        'CONSULTA_URL retornou HTTP:',
+        response.status
+      );
+
       return null;
     }
 
@@ -190,8 +217,13 @@ async function fetchCpfFromApi(cpf) {
 
     return {
       cpf: String(dados.cpf).replace(/\D/g, ''),
+
       nome: dados.nome,
+
+      // A API pode mandar DD/MM/YYYY.
+      // Aqui convertemos para YYYY-MM-DD.
       dataNascimento: normalizarData(dados.dataNascimento),
+
       sexo: dados.sexo
     };
 
@@ -204,6 +236,7 @@ async function fetchCpfFromApi(cpf) {
     clearTimeout(timeout);
   }
 }
+
 // POST /api/save-pix-session — salva sessão PIX
 app.post('/api/validate-cpf', async (req, res) => {
   const { cpf } = req.body;
