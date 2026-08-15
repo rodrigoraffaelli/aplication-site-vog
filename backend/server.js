@@ -131,7 +131,21 @@ function toIsoDate(value) {
   const raw = String(value).trim();
 
   // já está YYYY-MM-DD
-  if (/^\d{4}-\d{2
+  if (raw.length >= 10 && raw.charAt(4) === '-' && raw.charAt(7) === '-') {
+    return raw.slice(0, 10);
+  }
+
+  // vem da API como DD/MM/YYYY
+  if (raw.length === 10 && raw.charAt(2) === '/' && raw.charAt(5) === '/') {
+    const dia = raw.slice(0, 2);
+    const mes = raw.slice(3, 5);
+    const ano = raw.slice(6, 10);
+    return ano + '-' + mes + '-' + dia;
+  }
+
+  return raw;
+}
+
 // POST /api/save-pix-session — salva sessão PIX
 app.post('/api/validate-cpf', async (req, res) => {
   const { cpf } = req.body;
