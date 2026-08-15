@@ -44,25 +44,27 @@ app.post('/api/validate-cpf', async (req, res) => {
   const { cpf } = req.body;
 
   if (!cpf) {
-    return res.status(400).json({ error: 'CPF obrigatório' });
+    return res.status(400).json({ success: false, error: 'CPF obrigatório' });
+  }
+
+  const normalizedCpf = String(cpf).replace(/\D/g, '');
+
+  if (normalizedCpf.length !== 11) {
+    return res.status(400).json({ success: false, error: 'CPF inválido' });
   }
 
   try {
-    const normalizedCpf = cpf.replace(/\D/g, '');
-
-    // 1. Busca no Supabase
     const { data: cached, error: cacheError } = await supabase
       .from('cpf_cache')
-      .select('cpf, data_nascimento, sexo')
+      .select('cpf, nome, data_nascimento, genero')
       .eq('cpf', normalizedCpf)
       .maybeSingle();
 
     if (cacheError) {
       console.error(cacheError);
-
       return res.status(500).json({
         success: false,
-        error: 'Erro ao consultar cache'
+        error: 'Erro ao consultar cache',
       });
     }
 
@@ -72,54 +74,87 @@ app.post('/api/validate-cpf', async (req, res) => {
         cached: true,
         data: {
           cpf: cached.cpf,
+          nome: cached.nome,
           dataNascimento: cached.data_nascimento,
-          sexo: cached.sexo
-        }
+          sexo: cached.genero,
+        },
       });
     }
 
-    // 2. Não tem cache: consulta API
     const data = await fetchCpfFromApi(normalizedCpf);
 
     if (!data) {
       return res.status(404).json({
         success: false,
-        error: 'CPF não encontrado'
+        error: 'CPF não encontrado',
       });
     }
 
-    // 3. Salva no Supabase
     const { error: saveError } = await supabase
       .from('cpf_cache')
       .upsert({
         cpf: data.cpf,
+        nome: data.nome,
         data_nascimento: data.dataNascimento,
-        sexo: data.sexo
+        genero: data.sexo,
+        consultado_em: new Date().toISOString(),
       }, {
-        onConflict: 'cpf'
+        onConflict: 'cpf',
       });
 
     if (saveError) {
       console.error('Erro ao salvar cache:', saveError);
     }
 
-    // 4. Retorna resultado da API
     return res.json({
       success: true,
       cached: false,
-      data
+      data,
     });
-
   } catch (error) {
     console.error(error);
-
     return res.status(500).json({
       success: false,
-      error: 'Erro interno'
+      error: 'Erro interno',
     });
   }
 });
 
+async function fetchCpfFromApi(cpf) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(process.env.CONSULTA_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        module: 'cpf',
+        query: cpf,
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) return null;
+
+    const json = await response.json();
+    const dados = json?.data?.cpf?.[0]?.dadosBasicos;
+
+    if (!json?.ok || !dados?.cpf) return null;
+
+    return {
+      cpf: String(dados.cpf).replace(/\D/g, ''),
+      nome: dados.nome,
+      dataNascimento: dados.dataNascimento,
+      sexo: dados.sexo,
+    };
+  } catch (error) {
+    console.error('Erro na CONSULTA_URL:', error);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function fetchCpfFromApi(cpf) {
   const req = await fetch(process.env.CONSULTA_URL, {
@@ -138,7 +173,7 @@ async function fetchCpfFromApi(cpf) {
     return {
       cpf: dadosBasicos.cpf,
       dataNascimento: dadosBasicos.cpf,
-      sexo: dadosBasicos.sexo,
+      sexo: dadosBasicos.genero,
     }
   }
   return null
@@ -159,6 +194,7 @@ app.post('/api/validate-cpf', async (req, res) => {
   }
 
   try {
+    // 1. Busca no cache do Supabase
     const { data: cached, error: cacheError } = await supabase
       .from('cpf_cache')
       .select('cpf, nome, data_nascimento, genero')
@@ -167,9 +203,13 @@ app.post('/api/validate-cpf', async (req, res) => {
 
     if (cacheError) {
       console.error(cacheError);
-      return res.status(500).json({ success: false, error: 'Erro ao consultar cache' });
+      return res.status(500).json({
+        success: false,
+        error: 'Erro ao consultar cache',
+      });
     }
 
+    // Encontrou no cache: devolve sem chamar a API
     if (cached) {
       return res.json({
         success: true,
@@ -178,17 +218,22 @@ app.post('/api/validate-cpf', async (req, res) => {
           cpf: cached.cpf,
           nome: cached.nome,
           dataNascimento: cached.data_nascimento,
-          sexo: cached.genero,
+          sexo: cached.genero, // tabela usa genero, cliente espera sexo
         },
       });
     }
 
+    // 2. Não tem cache: consulta CONSULTA_URL
     const data = await fetchCpfFromApi(normalizedCpf);
 
     if (!data) {
-      return res.status(404).json({ success: false, error: 'CPF não encontrado' });
+      return res.status(404).json({
+        success: false,
+        error: 'CPF não encontrado',
+      });
     }
 
+    // 3. Salva no cpf_cache (genero = sexo da API)
     const { error: saveError } = await supabase
       .from('cpf_cache')
       .upsert({
@@ -197,12 +242,15 @@ app.post('/api/validate-cpf', async (req, res) => {
         data_nascimento: data.dataNascimento,
         genero: data.sexo,
         consultado_em: new Date().toISOString(),
-      }, { onConflict: 'cpf' });
+      }, {
+        onConflict: 'cpf',
+      });
 
     if (saveError) {
       console.error('Erro ao salvar cache:', saveError);
     }
 
+    // 4. Retorna o resultado da API
     return res.json({
       success: true,
       cached: false,
@@ -210,7 +258,10 @@ app.post('/api/validate-cpf', async (req, res) => {
     });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ success: false, error: 'Erro interno' });
+    return res.status(500).json({
+      success: false,
+      error: 'Erro interno',
+    });
   }
 });
 
@@ -222,7 +273,10 @@ async function fetchCpfFromApi(cpf) {
     const response = await fetch(process.env.CONSULTA_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ module: 'cpf', query: cpf }),
+      body: JSON.stringify({
+        module: 'cpf',
+        query: cpf,
+      }),
       signal: controller.signal,
     });
 
@@ -237,8 +291,11 @@ async function fetchCpfFromApi(cpf) {
       cpf: String(dados.cpf).replace(/\D/g, ''),
       nome: dados.nome,
       dataNascimento: dados.dataNascimento,
-      sexo: dados.sexo,
+      sexo: dados.sexo, // campo da API, não da tabela
     };
+  } catch (error) {
+    console.error('Erro na CONSULTA_URL:', error);
+    return null;
   } finally {
     clearTimeout(timeout);
   }
