@@ -44,13 +44,19 @@ app.post('/api/validate-cpf', async (req, res) => {
   const { cpf } = req.body;
 
   if (!cpf) {
-    return res.status(400).json({ success: false, error: 'CPF obrigatório' });
+    return res.status(400).json({
+      success: false,
+      error: 'CPF obrigatório'
+    });
   }
 
   const normalizedCpf = String(cpf).replace(/\D/g, '');
 
   if (normalizedCpf.length !== 11) {
-    return res.status(400).json({ success: false, error: 'CPF inválido' });
+    return res.status(400).json({
+      success: false,
+      error: 'CPF inválido'
+    });
   }
 
   try {
@@ -63,13 +69,14 @@ app.post('/api/validate-cpf', async (req, res) => {
 
     if (cacheError) {
       console.error(cacheError);
+
       return res.status(500).json({
         success: false,
-        error: 'Erro ao consultar cache',
+        error: 'Erro ao consultar cache'
       });
     }
 
-    // Encontrou no cache: devolve sem chamar a API
+    // Encontrou no cache
     if (cached) {
       return res.json({
         success: true,
@@ -77,23 +84,23 @@ app.post('/api/validate-cpf', async (req, res) => {
         data: {
           cpf: cached.cpf,
           nome: cached.nome,
-          dataNascimento: toIsoDate(cached.data_nascimento),
-          sexo: cached.genero, // tabela usa genero, cliente espera sexo
-        },
+          dataNascimento: normalizarData(cached.data_nascimento),
+          sexo: cached.genero
+        }
       });
     }
 
-    // 2. Não tem cache: consulta CONSULTA_URL
+    // 2. Não tem cache: consulta API
     const data = await fetchCpfFromApi(normalizedCpf);
 
     if (!data) {
       return res.status(404).json({
         success: false,
-        error: 'CPF não encontrado',
+        error: 'CPF não encontrado'
       });
     }
 
-    // 3. Salva no cpf_cache (genero = sexo da API)
+    // 3. Salva no cache
     const { error: saveError } = await supabase
       .from('cpf_cache')
       .upsert({
@@ -101,51 +108,102 @@ app.post('/api/validate-cpf', async (req, res) => {
         nome: data.nome,
         data_nascimento: data.dataNascimento,
         genero: data.sexo,
-        consultado_em: new Date().toISOString(),
+        consultado_em: new Date().toISOString()
       }, {
-        onConflict: 'cpf',
+        onConflict: 'cpf'
       });
 
     if (saveError) {
       console.error('Erro ao salvar cache:', saveError);
     }
 
-    // 4. Retorna o resultado da API
+    // 4. Retorna resultado da API
     return res.json({
       success: true,
       cached: false,
-      data,
+      data
     });
+
   } catch (error) {
     console.error(error);
+
     return res.status(500).json({
       success: false,
-      error: 'Erro interno',
+      error: 'Erro interno'
     });
   }
 });
 
-function toIsoDate(value) {
-  if (!value) return null;
 
-  const raw = String(value).trim();
+function normalizarData(data) {
+  if (!data) return null;
 
-  // já está YYYY-MM-DD
-  if (raw.length >= 10 && raw.charAt(4) === '-' && raw.charAt(7) === '-') {
-    return raw.slice(0, 10);
+  const valor = String(data).trim();
+
+  // Já está em YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(valor)) {
+    return valor;
   }
 
-  // vem da API como DD/MM/YYYY
-  if (raw.length === 10 && raw.charAt(2) === '/' && raw.charAt(5) === '/') {
-    const dia = raw.slice(0, 2);
-    const mes = raw.slice(3, 5);
-    const ano = raw.slice(6, 10);
-    return ano + '-' + mes + '-' + dia;
+  // API retorna DD/MM/YYYY
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(valor)) {
+    const [dia, mes, ano] = valor.split('/');
+
+    return `${ano}-${mes}-${dia}`;
   }
 
-  return raw;
+  return valor;
 }
 
+
+async function fetchCpfFromApi(cpf) {
+  const controller = new AbortController();
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, 10000);
+
+  try {
+    const response = await fetch(process.env.CONSULTA_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        module: 'cpf',
+        query: cpf
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const json = await response.json();
+
+    const dados = json?.data?.cpf?.[0]?.dadosBasicos;
+
+    if (!json?.ok || !dados?.cpf) {
+      return null;
+    }
+
+    return {
+      cpf: String(dados.cpf).replace(/\D/g, ''),
+      nome: dados.nome,
+      dataNascimento: normalizarData(dados.dataNascimento),
+      sexo: dados.sexo
+    };
+
+  } catch (error) {
+    console.error('Erro na CONSULTA_URL:', error);
+
+    return null;
+
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 // POST /api/save-pix-session — salva sessão PIX
 app.post('/api/validate-cpf', async (req, res) => {
   const { cpf } = req.body;
