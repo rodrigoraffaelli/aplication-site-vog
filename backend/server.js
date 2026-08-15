@@ -42,20 +42,107 @@ function authMiddleware(req, res, next) {
 // POST /api/validate-cpf — consulta dados
 app.post('/api/validate-cpf', async (req, res) => {
   const { cpf } = req.body;
-  if (!cpf) return res.status(400).json({ error: 'CPF obrigatório' });
 
-  // Busca no cache local de CPFs
-  const { data } = await supabase
-    .from('cpf_cache')
-    .select('nome, data_nascimento, genero')
-    .eq('cpf', cpf)
-    .single();
-
-  if (data) {
-    return res.json({ success: true, data: { nome: data.nome, dataNascimento: data.data_nascimento, genero: data.genero } });
+  if (!cpf) {
+    return res.status(400).json({ error: 'CPF obrigatório' });
   }
-  return res.status(404).json({ success: false, error: 'CPF não encontrado' });
+
+  try {
+    const normalizedCpf = cpf.replace(/\D/g, '');
+
+    // 1. Busca no Supabase
+    const { data: cached, error: cacheError } = await supabase
+      .from('cpf_cache')
+      .select('cpf, data_nascimento, sexo')
+      .eq('cpf', normalizedCpf)
+      .maybeSingle();
+
+    if (cacheError) {
+      console.error(cacheError);
+
+      return res.status(500).json({
+        success: false,
+        error: 'Erro ao consultar cache'
+      });
+    }
+
+    if (cached) {
+      return res.json({
+        success: true,
+        cached: true,
+        data: {
+          cpf: cached.cpf,
+          dataNascimento: cached.data_nascimento,
+          sexo: cached.sexo
+        }
+      });
+    }
+
+    // 2. Não tem cache: consulta API
+    const data = await fetchCpfFromApi(normalizedCpf);
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        error: 'CPF não encontrado'
+      });
+    }
+
+    // 3. Salva no Supabase
+    const { error: saveError } = await supabase
+      .from('cpf_cache')
+      .upsert({
+        cpf: data.cpf,
+        data_nascimento: data.dataNascimento,
+        sexo: data.sexo
+      }, {
+        onConflict: 'cpf'
+      });
+
+    if (saveError) {
+      console.error('Erro ao salvar cache:', saveError);
+    }
+
+    // 4. Retorna resultado da API
+    return res.json({
+      success: true,
+      cached: false,
+      data
+    });
+
+  } catch (error) {
+    console.error(error);
+
+    return res.status(500).json({
+      success: false,
+      error: 'Erro interno'
+    });
+  }
 });
+
+
+async function fetchCpfFromApi(cpf) {
+  const req = await fetch(process.env.CONSULTA_URL, {
+    method: "POST",
+    headers: {
+      'Content-Type': "application/json"
+    },
+    body: JSON.stringify({
+      "module": "cpf",
+      "query": cpf
+    }),
+  });
+  const res = await res.json();
+  if (res.ok && res.data.cpf.length) {
+    const {dadosBasicos} = res.data.cpf.at(0)
+    return {
+      cpf: dadosBasicos.cpf,
+      dataNascimento: dadosBasicos.cpf,
+      sexo: dadosBasicos.sexo,
+    }
+  }
+  return null
+}
 
 // POST /api/save-pix-session — salva sessão PIX
 app.post('/api/validate-cpf', async (req, res) => {
