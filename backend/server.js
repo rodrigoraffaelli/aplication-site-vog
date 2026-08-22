@@ -1,4 +1,4 @@
-console.log('### VERSAO DEBUG 2026-08-21-01 ###');
+console.log('### VERSAO FIX 2026-08-22 ###');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -38,216 +38,97 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ─── ENDPOINTS PÚBLICOS ─────────────────────────────────
-
-// POST /api/validate-cpf — consulta dados
-
-app.post('/api/validate-cpf', async (req, res) => {
-  const { cpf } = req.body;
-
-  if (!cpf) {
-    return res.status(400).json({
-      success: false,
-      error: 'CPF obrigatório'
-    });
-  }
-
-  const normalizedCpf = String(cpf).replace(/\D/g, '');
-
-  if (normalizedCpf.length !== 11) {
-    return res.status(400).json({
-      success: false,
-      error: 'CPF inválido'
-    });
-  }
-
-  try {
-    // 1. Busca no cache do Supabase
-    const { data: cached, error: cacheError } = await supabase
-      .from('cpf_cache')
-      .select('cpf, nome, data_nascimento, genero')
-      .eq('cpf', normalizedCpf)
-      .maybeSingle();
-
-    if (cacheError) {
-      console.error('Erro ao consultar cache:', cacheError);
-
-      return res.status(500).json({
-        success: false,
-        error: 'Erro ao consultar cache'
-      });
-    }
-
-    // Encontrou no cache
-    if (cached) {
-      return res.json({
-        success: true,
-        cached: true,
-        data: {
-          cpf: cached.cpf,
-          nome: cached.nome,
-
-          // Garante que o frontend receba YYYY-MM-DD
-          dataNascimento: normalizarData(cached.data_nascimento),
-
-          sexo: cached.genero
-        }
-      });
-    }
-
-    // 2. Não tem cache → consulta API externa
-    const data = await fetchCpfFromApi(normalizedCpf);
-
-    if (!data) {
-      return res.status(404).json({
-        success: false,
-        error: 'CPF não encontrado'
-      });
-    }
-
-    // 3. Salva no cache
-    // data.dataNascimento já foi normalizada para YYYY-MM-DD
-// 3. Salva no cache
-// data.dataNascimento já foi normalizada para YYYY-MM-DD
-
-console.log('===== ANTES DE SALVAR NO SUPABASE =====');
-console.log('CPF:', data.cpf);
-console.log('Nome:', data.nome);
-console.log('Data nascimento:', data.dataNascimento);
-console.log('Sexo:', data.sexo);
-console.log('========================================');
-
-const { error: saveError } = await supabase
-  .from('cpf_cache')
-  .upsert({
-    cpf: data.cpf,
-    nome: data.nome,
-    data_nascimento: data.dataNascimento,
-    genero: data.sexo,
-    consultado_em: new Date().toISOString()
-  }, {
-    onConflict: 'cpf'
-  });
-
-if (saveError) {
-  console.error('Erro ao salvar cache:', saveError);
-}
-    // 4. Retorna para o frontend
-    return res.json({
-      success: true,
-      cached: false,
-      data
-    });
-
-  } catch (error) {
-    console.error('Erro interno:', error);
-
-    return res.status(500).json({
-      success: false,
-      error: 'Erro interno'
-    });
-  }
-});
-
-
+// ─── NORMALIZAÇÃO DE DATA ───────────────────────────────
 /**
- * Converte:
+ * Converte QUALQUER formato comum de data para YYYY-MM-DD:
+ *   DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, YYYY/MM/DD,
+ *   ISO com hora (1995-08-10T00:00:00.000Z), timestamp.
  *
- * DD/MM/YYYY → YYYY-MM-DD
- *
- * O frontend espera YYYY-MM-DD porque
- * a função Fv() faz:
- *
- * "1995-08-10" → "10/08/1995"
+ * Nunca retorna null/undefined: se não conseguir converter,
+ * retorna '' (string vazia) para o frontend NÃO quebrar
+ * (null.split() causa tela branca no React).
  */
 function normalizarData(data) {
-  if (!data) return null;
-
+  if (data === null || data === undefined) return '';
   const valor = String(data).trim();
+  if (!valor) return '';
 
-  // Já está no formato esperado pelo frontend
-  if (/^\d{4}-\d{2}-\d{2}$/.test(valor)) {
-    return valor;
-  }
+  // Já está em YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(valor)) return valor;
 
-  // API externa retorna DD/MM/YYYY
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(valor)) {
-    const [dia, mes, ano] = valor.split('/');
-
+  // YYYY/MM/DD
+  if (/^\d{4}\/\d{2}\/\d{2}$/.test(valor)) {
+    const [ano, mes, dia] = valor.split('/');
     return `${ano}-${mes}-${dia}`;
   }
 
-  // Se vier em algum formato inesperado,
-  // não tenta inventar uma conversão.
-  console.warn('Formato de data não reconhecido:', valor);
+  // ISO com hora: 1995-08-10T00:00:00.000Z ou "1995-08-10 00:00:00"
+  if (/^\d{4}-\d{2}-\d{2}/.test(valor)) {
+    return valor.slice(0, 10);
+  }
 
-  return valor;
+  // DD/MM/YYYY (com ou sem hora)
+  let m = valor.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+
+  // DD-MM-YYYY
+  m = valor.match(/^(\d{2})-(\d{2})-(\d{4})/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+
+  // Timestamp (segundos ou milissegundos)
+  if (/^\d{9,13}$/.test(valor)) {
+    const t = Number(valor);
+    const dt = new Date(t > 1e12 ? t : t * 1000);
+    if (!isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
+  }
+
+  console.warn('Formato de data não reconhecido:', valor);
+  return '';
 }
 
-
+// ─── CONSULTA API EXTERNA DE CPF ────────────────────────
 async function fetchCpfFromApi(cpf) {
   const controller = new AbortController();
-
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, 10000);
+  const timeout = setTimeout(() => controller.abort(), 10000);
 
   try {
     const response = await fetch(process.env.CONSULTA_URL, {
       method: 'POST',
-
-      headers: {
-        'Content-Type': 'application/json'
-      },
-
-      body: JSON.stringify({
-        module: 'cpf',
-        query: cpf
-      }),
-
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ module: 'cpf', query: cpf }),
       signal: controller.signal
     });
 
     if (!response.ok) {
-      console.error(
-        'CONSULTA_URL retornou HTTP:',
-        response.status
-      );
-
+      console.error('CONSULTA_URL retornou HTTP:', response.status);
       return null;
     }
 
     const json = await response.json();
-
     const dados = json?.data?.cpf?.[0]?.dadosBasicos;
 
-    if (!json?.ok || !dados?.cpf) {
-      return null;
-    }
+    if (!json?.ok || !dados?.cpf) return null;
 
-console.log('===== DEBUG DATA =====');
-console.log('Data original da API:', dados.dataNascimento);
-console.log('Data normalizada:', normalizarData(dados.dataNascimento));
-console.log('======================');
+    const dataNascimento = normalizarData(dados.dataNascimento);
+    console.log('Data original da API:', dados.dataNascimento, '→ normalizada:', dataNascimento);
 
-return {
-  cpf: String(dados.cpf).replace(/\D/g, ''),
-  nome: dados.nome,
-  dataNascimento: normalizarData(dados.dataNascimento),
-  sexo: dados.sexo
-};
-
+    return {
+      cpf: String(dados.cpf).replace(/\D/g, ''),
+      nome: dados.nome,
+      dataNascimento,
+      sexo: dados.sexo
+    };
   } catch (error) {
     console.error('Erro na CONSULTA_URL:', error);
-
     return null;
-
   } finally {
     clearTimeout(timeout);
   }
 }
 
-// POST /api/save-pix-session — salva sessão PIX
+// ─── ENDPOINTS PÚBLICOS ─────────────────────────────────
+
+// POST /api/validate-cpf — consulta dados
 app.post('/api/validate-cpf', async (req, res) => {
   const { cpf } = req.body;
 
@@ -270,14 +151,11 @@ app.post('/api/validate-cpf', async (req, res) => {
       .maybeSingle();
 
     if (cacheError) {
-      console.error(cacheError);
-      return res.status(500).json({
-        success: false,
-        error: 'Erro ao consultar cache',
-      });
+      console.error('Erro ao consultar cache:', cacheError);
+      return res.status(500).json({ success: false, error: 'Erro ao consultar cache' });
     }
 
-    // Encontrou no cache: devolve sem chamar a API
+    // Encontrou no cache
     if (cached) {
       return res.json({
         success: true,
@@ -285,20 +163,18 @@ app.post('/api/validate-cpf', async (req, res) => {
         data: {
           cpf: cached.cpf,
           nome: cached.nome,
-          dataNascimento: cached.data_nascimento,
-          sexo: cached.genero, // tabela usa genero, cliente espera sexo
-        },
+          // Garante que o frontend receba YYYY-MM-DD
+          dataNascimento: normalizarData(cached.data_nascimento),
+          sexo: cached.genero
+        }
       });
     }
 
-    // 2. Não tem cache: consulta CONSULTA_URL
+    // 2. Não tem cache → consulta API externa
     const data = await fetchCpfFromApi(normalizedCpf);
 
     if (!data) {
-      return res.status(404).json({
-        success: false,
-        error: 'CPF não encontrado',
-      });
+      return res.status(404).json({ success: false, error: 'CPF não encontrado' });
     }
 
     // 3. Salva no cpf_cache (genero = sexo da API)
@@ -309,65 +185,20 @@ app.post('/api/validate-cpf', async (req, res) => {
         nome: data.nome,
         data_nascimento: data.dataNascimento,
         genero: data.sexo,
-        consultado_em: new Date().toISOString(),
-      }, {
-        onConflict: 'cpf',
-      });
+        consultado_em: new Date().toISOString()
+      }, { onConflict: 'cpf' });
 
     if (saveError) {
       console.error('Erro ao salvar cache:', saveError);
     }
 
     // 4. Retorna o resultado da API
-    return res.json({
-      success: true,
-      cached: false,
-      data,
-    });
+    return res.json({ success: true, cached: false, data });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({
-      success: false,
-      error: 'Erro interno',
-    });
+    console.error('Erro interno:', error);
+    return res.status(500).json({ success: false, error: 'Erro interno' });
   }
 });
-
-async function fetchCpfFromApi(cpf) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
-
-  try {
-    const response = await fetch(process.env.CONSULTA_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        module: 'cpf',
-        query: cpf,
-      }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) return null;
-
-    const json = await response.json();
-    const dados = json?.data?.cpf?.[0]?.dadosBasicos;
-
-    if (!json?.ok || !dados?.cpf) return null;
-
-    return {
-      cpf: String(dados.cpf).replace(/\D/g, ''),
-      nome: dados.nome,
-      dataNascimento: dados.dataNascimento,
-      sexo: dados.sexo, // campo da API, não da tabela
-    };
-  } catch (error) {
-    console.error('Erro na CONSULTA_URL:', error);
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
 
 // GET /api/pix-session/:token — busca sessão por token
 app.get('/api/pix-session/:token', async (req, res) => {
@@ -463,7 +294,6 @@ app.post('/api/admin/login', async (req, res) => {
   );
 
   res.json({ success: true, token, data: { token }, message: "Login realizado com sucesso" });
-
 });
 
 // GET /api/admin/settings — credenciais PixVault
