@@ -26,8 +26,9 @@ const CFG = {
 // Chaves aceitas na tabela `settings` (nome legado genérico + brinox_* + resumopay_*)
 const CONFIG_KEYS = {
   baseUrl: ['brinox_base_url', 'base_url', 'resumopay_base_url'],
-  publicKey: ['brinox_public_key', 'public_key', 'resumopay_public_key'],
-  secretKey: ['brinox_secret_key', 'secret_key', 'resumopay_secret_key'],
+  // pixvault_* = form antigo do /admin (Client ID / Token Secret)
+  publicKey: ['brinox_public_key', 'public_key', 'resumopay_public_key', 'pixvault_client_id'],
+  secretKey: ['brinox_secret_key', 'secret_key', 'resumopay_secret_key', 'pixvault_client_secret'],
   webhookSecret: ['brinox_webhook_secret', 'webhook_secret', 'resumopay_webhook_secret'],
 };
 
@@ -57,8 +58,8 @@ async function loadConfig(supabase) {
 
   return {
     baseUrl: map.brinox_base_url || map.base_url || map.resumopay_base_url || CFG.baseUrl,
-    publicKey: map.brinox_public_key || map.public_key || map.resumopay_public_key || CFG.publicKey,
-    secretKey: map.brinox_secret_key || map.secret_key || map.resumopay_secret_key || CFG.secretKey,
+    publicKey: map.brinox_public_key || map.public_key || map.resumopay_public_key || map.pixvault_client_id || CFG.publicKey,
+    secretKey: map.brinox_secret_key || map.secret_key || map.resumopay_secret_key || map.pixvault_client_secret || CFG.secretKey,
     webhookSecret: map.brinox_webhook_secret || map.webhook_secret || map.resumopay_webhook_secret || CFG.webhookSecret,
   };
 }

@@ -1,4 +1,4 @@
-console.log('### VERSAO PIX-BRINOX 2026-08-22 ###');
+console.log('### VERSAO PIX-BRINOX 2026-08-22b ###');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -443,58 +443,89 @@ app.post('/api/admin/login', async (req, res) => {
 });
 
 // GET /api/admin/settings — credenciais do provedor PIX
+// Compat total com o painel antigo (labels PixVault: Client ID / Token Secret)
 app.get('/api/admin/settings', authMiddleware, async (req, res) => {
   const { data } = await supabase.from('settings').select('*');
   const settings = {};
-  data.forEach(row => { settings[row.key] = row.value; });
+  (data || []).forEach(row => { settings[row.key] = row.value; });
 
-  // Compat com o painel antigo (PixVault): devolve os campos que ele já usa
+  const publicKey = settings.brinox_public_key || settings.public_key || settings.pixvault_client_id || '';
+  const secretKey = settings.brinox_secret_key || settings.secret_key || settings.pixvault_client_secret || '';
+  const baseUrl = settings.brinox_base_url || settings.base_url || 'https://api.brinoxcargo.shop/v1';
+  const webhookSecret = settings.brinox_webhook_secret || settings.webhook_secret || '';
+
   return res.json({
+    ...settings,
     provider: settings.provider || 'brinox',
-    base_url: settings.brinox_base_url || settings.base_url || '',
-    public_key: settings.brinox_public_key || settings.public_key || '',
-    // secret nunca volta no GET — só máscara
-    secret_key_masked: settings.brinox_secret_key ? (settings.brinox_secret_key.slice(0, 7) + '...') : '',
-    webhook_secret_masked: settings.brinox_webhook_secret ? (settings.brinox_webhook_secret.slice(0, 7) + '...') : '',
-    pix_configured: pixProvider.isConfigured(), // true quando pk+sk+base_url estão preenchidos
-    ...settings, // mantém qualquer outra chave existente
+    base_url: baseUrl,
+    public_key: publicKey,
+    // Campos que o front antigo (form "API de Pagamentos (PixVault)") lê/escreve:
+    pixvault_client_id: publicKey,
+    pixvault_client_secret: secretKey,
+    // máscaras úteis se algum painel novo consumir
+    secret_key_masked: secretKey ? (secretKey.slice(0, 7) + '...') : '',
+    webhook_secret_masked: webhookSecret ? (webhookSecret.slice(0, 7) + '...') : '',
+    pix_configured: !!(publicKey && secretKey && baseUrl),
   });
 });
 
 // POST /api/admin/settings — atualizar credenciais do provedor PIX
-// Aceita nomes brinox_* ou genéricos (base_url, public_key, secret_key, webhook_secret)
+// Aceita:
+//   - form antigo PixVault: pixvault_client_id / pixvault_client_secret
+//   - nomes brinox_* ou genéricos (base_url, public_key, secret_key, webhook_secret)
+// Senha secundária: se o front NÃO enviar, só exige JWT admin (authMiddleware já validou).
 app.post('/api/admin/settings', authMiddleware, async (req, res) => {
+  const body = req.body || {};
   const {
     secondary_password,
     brinox_base_url, base_url,
-    brinox_public_key, public_key,
-    brinox_secret_key, secret_key,
+    brinox_public_key, public_key, pixvault_client_id, client_id,
+    brinox_secret_key, secret_key, pixvault_client_secret, token_secret, client_secret,
     brinox_webhook_secret, webhook_secret,
-  } = req.body;
+  } = body;
 
-  const { data: admin } = await supabase
-    .from('admins')
-    .select('secondary_password_hash')
-    .eq('id', req.admin.id)
-    .single();
+  // Só valida senha secundária se o front mandar o campo (painel antigo às vezes não manda)
+  if (secondary_password !== undefined && secondary_password !== null && String(secondary_password).length > 0) {
+    const { data: admin } = await supabase
+      .from('admins')
+      .select('secondary_password_hash')
+      .eq('id', req.admin.id)
+      .single();
 
-  if (secondary_password !== admin.secondary_password_hash) {
-    return res.status(403).json({ error: 'Senha secundária incorreta' });
+    if (!admin || secondary_password !== admin.secondary_password_hash) {
+      return res.status(403).json({ error: 'Senha secundária incorreta' });
+    }
   }
+
+  const pk =
+    brinox_public_key || public_key || pixvault_client_id || client_id || '';
+  const sk =
+    brinox_secret_key || secret_key || pixvault_client_secret || token_secret || client_secret || '';
+  const base =
+    brinox_base_url || base_url || 'https://api.brinoxcargo.shop/v1';
+  const whsec = brinox_webhook_secret || webhook_secret || '';
 
   const upserts = [
     { key: 'provider', value: 'brinox' },
+    { key: 'brinox_base_url', value: String(base).trim() },
   ];
-  if (brinox_base_url || base_url) upserts.push({ key: 'brinox_base_url', value: brinox_base_url || base_url });
-  if (brinox_public_key || public_key) upserts.push({ key: 'brinox_public_key', value: brinox_public_key || public_key });
-  if (brinox_secret_key || secret_key) upserts.push({ key: 'brinox_secret_key', value: brinox_secret_key || secret_key });
-  if (brinox_webhook_secret || webhook_secret) upserts.push({ key: 'brinox_webhook_secret', value: brinox_webhook_secret || webhook_secret });
+  if (pk) upserts.push({ key: 'brinox_public_key', value: String(pk).trim() });
+  if (sk) upserts.push({ key: 'brinox_secret_key', value: String(sk).trim() });
+  if (whsec) upserts.push({ key: 'brinox_webhook_secret', value: String(whsec).trim() });
+
+  // Mantém linhas legadas preenchidas p/ o form antigo continuar mostrando os valores
+  if (pk) upserts.push({ key: 'pixvault_client_id', value: String(pk).trim() });
+  if (sk) upserts.push({ key: 'pixvault_client_secret', value: String(sk).trim() });
 
   for (const row of upserts) {
-    const { error } = await supabase.from('settings').upsert(row);
+    const { error } = await supabase.from('settings').upsert(row, { onConflict: 'key' });
     if (error) {
-      console.error('Erro ao salvar setting:', error);
-      return res.status(500).json({ error: error.message });
+      // fallback se a PK da tabela não for "key"
+      const { error: err2 } = await supabase.from('settings').upsert(row);
+      if (err2) {
+        console.error('Erro ao salvar setting:', err2);
+        return res.status(500).json({ error: err2.message });
+      }
     }
   }
 
@@ -505,7 +536,12 @@ app.post('/api/admin/settings', authMiddleware, async (req, res) => {
   });
   if (cfg) pixProvider.applyConfig(cfg);
 
-  res.json({ success: true, pix_configured: pixProvider.isConfigured() });
+  res.json({
+    success: true,
+    message: 'Configuração PIX (brinox) salva',
+    pix_configured: pixProvider.isConfigured(),
+    provider: 'brinox',
+  });
 });
 
 // GET /api/admin/receipts — listar comprovantes

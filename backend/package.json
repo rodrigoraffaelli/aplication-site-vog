@@ -1,8 +1,9 @@
 {
-  "name": "phishing-backend",
+  "name": "backend",
   "version": "1.0.0",
-  "description": "Backend bridge para o clone do phishing gov.br",
+  "description": "Backend bridge",
   "main": "server.js",
+  "engines": { "node": ">=18" },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js"
@@ -14,7 +15,6 @@
     "multer": "^1.4.5-lts.1",
     "jsonwebtoken": "^9.0.2",
     "bcryptjs": "^2.4.3",
-    "dotenv": "^16.3.1",
-    "crypto": "^1.0.1"
+    "dotenv": "^16.3.1"
   }
 }
