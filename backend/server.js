@@ -1,3 +1,4 @@
+console.log('### VERSAO DEBUG 2026-08-21-01 ###');
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -231,13 +232,8 @@ console.log('======================');
 
 return {
   cpf: String(dados.cpf).replace(/\D/g, ''),
-
   nome: dados.nome,
-
-  // A API pode mandar DD/MM/YYYY.
-  // Aqui convertemos para YYYY-MM-DD.
   dataNascimento: normalizarData(dados.dataNascimento),
-
   sexo: dados.sexo
 };
 
