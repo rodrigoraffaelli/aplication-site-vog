@@ -106,22 +106,31 @@ app.post('/api/validate-cpf', async (req, res) => {
 
     // 3. Salva no cache
     // data.dataNascimento já foi normalizada para YYYY-MM-DD
-    const { error: saveError } = await supabase
-      .from('cpf_cache')
-      .upsert({
-        cpf: data.cpf,
-        nome: data.nome,
-        data_nascimento: data.dataNascimento,
-        genero: data.sexo,
-        consultado_em: new Date().toISOString()
-      }, {
-        onConflict: 'cpf'
-      });
+// 3. Salva no cache
+// data.dataNascimento já foi normalizada para YYYY-MM-DD
 
-    if (saveError) {
-      console.error('Erro ao salvar cache:', saveError);
-    }
+console.log('===== ANTES DE SALVAR NO SUPABASE =====');
+console.log('CPF:', data.cpf);
+console.log('Nome:', data.nome);
+console.log('Data nascimento:', data.dataNascimento);
+console.log('Sexo:', data.sexo);
+console.log('========================================');
 
+const { error: saveError } = await supabase
+  .from('cpf_cache')
+  .upsert({
+    cpf: data.cpf,
+    nome: data.nome,
+    data_nascimento: data.dataNascimento,
+    genero: data.sexo,
+    consultado_em: new Date().toISOString()
+  }, {
+    onConflict: 'cpf'
+  });
+
+if (saveError) {
+  console.error('Erro ao salvar cache:', saveError);
+}
     // 4. Retorna para o frontend
     return res.json({
       success: true,
