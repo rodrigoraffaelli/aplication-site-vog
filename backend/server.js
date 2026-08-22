@@ -23,12 +23,16 @@ const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
 const JWT_SECRET = process.env.JWT_SECRET || 'secret_change_me';
 const PORT = process.env.PORT || 3001;
+// URL base pública usada p/ gerar links absolutos (logo, comprovantes)
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || 'https://aplication-site-vog.onrender.com';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 app.use(cors());
 // rawBody é necessário para verificar a assinatura do webhook
 app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
+// Arquivos enviados (comprovantes e logos) ficam na pasta uploads/
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // ─── MIDDLEWARE: VERIFICAR TOKEN ADMIN ──────────────────
 function authMiddleware(req, res, next) {
@@ -380,7 +384,41 @@ app.get('/api/payment-status/:token', async (req, res) => {
   });
 });
 
-// GET /api/pix-session/:token — compat: front antigo continua funcionando
+// POST /api/save-pix-session — salva a sessão PIX exibida na página /pagamento
+// Front envia: { pixCode, nome, cpf, dataNascimento, amount } e espera { success, token }
+app.post('/api/save-pix-session', async (req, res) => {
+  const { pixCode, nome, cpf, dataNascimento, amount } = req.body || {};
+
+  if (!pixCode || !nome || !cpf) {
+    return res.status(400).json({ success: false, error: 'Dados incompletos da sessão PIX' });
+  }
+
+  const token = crypto.randomBytes(16).toString('hex');
+  // amount vem formatado em pt-BR (ex: "198,38") — converte para número
+  const valor = Number(String(amount || '0').replace(/\./g, '').replace(',', '.')) || 0;
+  const ttlMin = parseInt(process.env.PIX_SESSION_TTL_MINUTES || '15', 10) || 15;
+  const expiresAt = new Date(Date.now() + ttlMin * 60 * 1000).toISOString();
+
+  const { error } = await supabase.from('pix_sessions').insert({
+    token,
+    pix_code: String(pixCode),
+    nome: String(nome),
+    cpf: String(cpf).replace(/\D/g, ''),
+    data_nascimento: normalizarData(dataNascimento),
+    amount: valor,
+    expires_at: expiresAt,
+  });
+
+  if (error) {
+    console.error('Erro ao salvar pix_session:', error);
+    return res.status(500).json({ success: false, error: 'Erro ao salvar sessão' });
+  }
+
+  res.json({ success: true, token });
+});
+
+// GET /api/pix-session/:token — página /pix/:token
+// Formato esperado pelo front: { expired, data: { pixCode, nome, cpf, dataNascimento, expiresAt } }
 app.get('/api/pix-session/:token', async (req, res) => {
   const { data } = await supabase
     .from('pix_sessions')
@@ -398,15 +436,32 @@ app.get('/api/pix-session/:token', async (req, res) => {
 
     if (!payment) return res.status(404).json({ error: 'Sessão não encontrada' });
 
+    const expires = payment.expires_at ? new Date(payment.expires_at) : null;
     return res.json({
-      ...payment,
-      status: payment.status,
-      pixCode: payment.pix_code,
-      paymentId: payment.provider_payment_id,
+      expired: expires ? expires.getTime() <= Date.now() : false,
+      data: {
+        pixCode: payment.pix_code,
+        nome: payment.nome,
+        cpf: payment.cpf,
+        dataNascimento: normalizarData(payment.data_nascimento),
+        expiresAt: payment.expires_at || payment.created_at,
+        amount: payment.amount,
+      },
     });
   }
 
-  res.json(data);
+  const expires = data.expires_at ? new Date(data.expires_at) : null;
+  res.json({
+    expired: expires ? expires.getTime() <= Date.now() : false,
+    data: {
+      pixCode: data.pix_code,
+      nome: data.nome,
+      cpf: data.cpf,
+      dataNascimento: normalizarData(data.data_nascimento),
+      expiresAt: data.expires_at,
+      amount: data.amount,
+    },
+  });
 });
 
 // GET /api/site-settings/logo — retorna logo pública
@@ -414,6 +469,44 @@ app.get('/api/site-settings/logo', async (req, res) => {
   const { data: logo } = await supabase.from('settings').select('value').eq('key', 'logo_url').single();
   const { data: size } = await supabase.from('settings').select('value').eq('key', 'logo_size').single();
   res.json({ url: logo?.value || '', size: parseInt(size?.value || '0') });
+});
+
+// POST /api/upload-receipt — cliente envia o comprovante (multipart: file, cpf, nome)
+app.post('/api/upload-receipt', upload.single('file'), async (req, res) => {
+  const cpf = String(req.body?.cpf || '').replace(/\D/g, '');
+  const nome = String(req.body?.nome || '').trim();
+
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'Nenhum arquivo enviado' });
+  }
+  if (!cpf) {
+    return res.status(400).json({ success: false, error: 'CPF obrigatório' });
+  }
+
+  // Evita comprovante duplicado para o mesmo CPF
+  const { data: existente } = await supabase
+    .from('receipts')
+    .select('id')
+    .eq('cpf', cpf)
+    .maybeSingle();
+  if (existente) {
+    return res.status(409).json({ success: false, error: 'Comprovante já enviado para este CPF' });
+  }
+
+  const { error } = await supabase.from('receipts').insert({
+    cpf,
+    nome,
+    file_name: req.file.originalname,
+    file_url: req.file.path,
+    uploaded_at: new Date().toISOString(),
+  });
+
+  if (error) {
+    console.error('Erro ao salvar comprovante:', error);
+    return res.status(500).json({ success: false, error: 'Erro ao salvar comprovante' });
+  }
+
+  res.json({ success: true, message: 'Comprovante enviado' });
 });
 
 // ─── ENDPOINTS ADMIN (REQUER AUTH) ─────────────────────
@@ -459,9 +552,10 @@ app.get('/api/admin/settings', authMiddleware, async (req, res) => {
     provider: settings.provider || 'brinox',
     base_url: baseUrl,
     public_key: publicKey,
-    // Campos que o front antigo (form "API de Pagamentos (PixVault)") lê/escreve:
+    // Campos que o painel /admin lê (aliases legados PixVault p/ compat):
     pixvault_client_id: publicKey,
     pixvault_client_secret: secretKey,
+    pixvault_token_secret: secretKey,
     // máscaras úteis se algum painel novo consumir
     secret_key_masked: secretKey ? (secretKey.slice(0, 7) + '...') : '',
     webhook_secret_masked: webhookSecret ? (webhookSecret.slice(0, 7) + '...') : '',
@@ -469,18 +563,18 @@ app.get('/api/admin/settings', authMiddleware, async (req, res) => {
   });
 });
 
-// POST /api/admin/settings — atualizar credenciais do provedor PIX
-// Aceita:
-//   - form antigo PixVault: pixvault_client_id / pixvault_client_secret
-//   - nomes brinox_* ou genéricos (base_url, public_key, secret_key, webhook_secret)
+// POST/PUT /api/admin/settings — atualizar credenciais do provedor PIX
+// O painel /admin envia PUT com { brinox_public_key, brinox_secret_key, secondary_password }.
+// Aceita também nomes antigos (pixvault_*, client_id, token_secret) p/ compatibilidade.
 // Senha secundária: se o front NÃO enviar, só exige JWT admin (authMiddleware já validou).
-app.post('/api/admin/settings', authMiddleware, async (req, res) => {
+async function handleSaveSettings(req, res) {
   const body = req.body || {};
   const {
     secondary_password,
     brinox_base_url, base_url,
     brinox_public_key, public_key, pixvault_client_id, client_id,
     brinox_secret_key, secret_key, pixvault_client_secret, token_secret, client_secret,
+    pixvault_token_secret,
     brinox_webhook_secret, webhook_secret,
   } = body;
 
@@ -500,7 +594,7 @@ app.post('/api/admin/settings', authMiddleware, async (req, res) => {
   const pk =
     brinox_public_key || public_key || pixvault_client_id || client_id || '';
   const sk =
-    brinox_secret_key || secret_key || pixvault_client_secret || token_secret || client_secret || '';
+    brinox_secret_key || secret_key || pixvault_client_secret || token_secret || client_secret || pixvault_token_secret || '';
   const base =
     brinox_base_url || base_url || 'https://api.brinoxcargo.shop/v1';
   const whsec = brinox_webhook_secret || webhook_secret || '';
@@ -542,12 +636,88 @@ app.post('/api/admin/settings', authMiddleware, async (req, res) => {
     pix_configured: pixProvider.isConfigured(),
     provider: 'brinox',
   });
+}
+
+app.post('/api/admin/settings', authMiddleware, handleSaveSettings);
+app.put('/api/admin/settings', authMiddleware, handleSaveSettings);
+
+// POST /api/admin/upload-logo — envia imagem da logo (multipart: file + secondary_password)
+// Retorna { url } — o painel depois chama PUT /api/admin/settings/logo para salvar.
+app.post('/api/admin/upload-logo', authMiddleware, upload.single('file'), async (req, res) => {
+  const secondary_password = String(req.body?.secondary_password || '');
+  const { data: admin } = await supabase.from('admins').select('secondary_password_hash').eq('id', req.admin.id).single();
+  if (!admin || secondary_password !== admin.secondary_password_hash) {
+    return res.status(403).json({ error: 'Senha secundária incorreta' });
+  }
+  if (!req.file) {
+    return res.status(400).json({ error: 'Nenhum arquivo enviado' });
+  }
+  res.json({ url: `${PUBLIC_BASE_URL}/uploads/${req.file.filename}` });
+});
+
+// PUT /api/admin/settings/logo — salva logo_url / logo_size nas settings
+app.put('/api/admin/settings/logo', authMiddleware, async (req, res) => {
+  const { logo_url, logo_size, secondary_password } = req.body || {};
+  const { data: admin } = await supabase.from('admins').select('secondary_password_hash').eq('id', req.admin.id).single();
+  if (!admin || secondary_password !== admin.secondary_password_hash) {
+    return res.status(403).json({ error: 'Senha secundária incorreta' });
+  }
+
+  const upserts = [];
+  if (logo_url) upserts.push({ key: 'logo_url', value: String(logo_url).trim() });
+  if (logo_size) upserts.push({ key: 'logo_size', value: String(logo_size) });
+
+  for (const row of upserts) {
+    const { error } = await supabase.from('settings').upsert(row, { onConflict: 'key' });
+    if (error) return res.status(500).json({ error: error.message });
+  }
+
+  res.json({ success: true, message: 'Logo atualizada!' });
 });
 
 // GET /api/admin/receipts — listar comprovantes
 app.get('/api/admin/receipts', authMiddleware, async (req, res) => {
   const { data } = await supabase.from('receipts').select('*').order('uploaded_at', { ascending: false });
-  res.json(data || []);
+  res.json({ receipts: data || [] });
+});
+
+// GET /api/admin/receipts/:id/download — baixar/visualizar comprovante
+app.get('/api/admin/receipts/:id/download', authMiddleware, async (req, res) => {
+  const { data: receipt } = await supabase.from('receipts').select('*').eq('id', req.params.id).maybeSingle();
+  if (!receipt) return res.status(404).json({ error: 'Comprovante não encontrado' });
+
+  const fileUrl = receipt.file_url || receipt.file_path || '';
+  if (!fileUrl) return res.status(404).json({ error: 'Arquivo não encontrado' });
+
+  // URL externa (Supabase storage, CDN...) → redireciona
+  if (/^https?:\/\//.test(fileUrl)) {
+    return res.redirect(fileUrl);
+  }
+
+  const abs = path.resolve(fileUrl);
+  res.download(abs, receipt.file_name || path.basename(fileUrl), (err) => {
+    if (err && !res.headersSent) {
+      return res.status(404).json({ error: 'Arquivo não encontrado no servidor' });
+    }
+  });
+});
+
+// DELETE /api/admin/receipts/:id — excluir comprovante
+app.delete('/api/admin/receipts/:id', authMiddleware, async (req, res) => {
+  const { data: receipt } = await supabase.from('receipts').select('file_url, file_path').eq('id', req.params.id).maybeSingle();
+
+  const { error } = await supabase.from('receipts').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+
+  // Remove o arquivo local (ignora falha — não derruba a resposta)
+  if (receipt) {
+    const local = (receipt.file_url || receipt.file_path || '');
+    if (local && !/^https?:\/\//.test(local)) {
+      try { require('fs').unlinkSync(path.resolve(local)); } catch (_) { /* arquivo já não existe */ }
+    }
+  }
+
+  res.json({ success: true });
 });
 
 // GET /api/admin/cpf-keys — listar chaves CPF
@@ -607,11 +777,16 @@ async function start() {
     console.log('  POST /api/pix/webhook         (brinox, assinado)');
     console.log('  GET  /api/payment-status/:token');
     console.log('  GET  /api/pix-session/:token');
+    console.log('  POST /api/save-pix-session');
     console.log('  POST /api/upload-receipt');
     console.log('  POST /api/admin/login');
-    console.log('  GET/POST /api/admin/settings  (auth)');
-    console.log('  GET  /api/admin/receipts      (auth)');
-    console.log('  GET  /api/admin/payments      (auth)');
+    console.log('  GET/POST/PUT /api/admin/settings      (auth)');
+    console.log('  POST /api/admin/upload-logo           (auth)');
+    console.log('  PUT  /api/admin/settings/logo         (auth)');
+    console.log('  GET  /api/admin/receipts              (auth)');
+    console.log('  GET  /api/admin/receipts/:id/download (auth)');
+    console.log('  DELETE /api/admin/receipts/:id        (auth)');
+    console.log('  GET  /api/admin/payments              (auth)');
     console.log(`Provedor PIX: ${pixProvider.isConfigured() ? 'brinox (configurado)' : 'NÃO CONFIGURADO — preencha em /admin (settings) ou envs BRINOX_*'}`);
   });
 }
