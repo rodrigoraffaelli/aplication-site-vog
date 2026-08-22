@@ -224,17 +224,22 @@ async function fetchCpfFromApi(cpf) {
       return null;
     }
 
-    return {
-      cpf: String(dados.cpf).replace(/\D/g, ''),
+console.log('===== DEBUG DATA =====');
+console.log('Data original da API:', dados.dataNascimento);
+console.log('Data normalizada:', normalizarData(dados.dataNascimento));
+console.log('======================');
 
-      nome: dados.nome,
+return {
+  cpf: String(dados.cpf).replace(/\D/g, ''),
 
-      // A API pode mandar DD/MM/YYYY.
-      // Aqui convertemos para YYYY-MM-DD.
-      dataNascimento: normalizarData(dados.dataNascimento),
+  nome: dados.nome,
 
-      sexo: dados.sexo
-    };
+  // A API pode mandar DD/MM/YYYY.
+  // Aqui convertemos para YYYY-MM-DD.
+  dataNascimento: normalizarData(dados.dataNascimento),
+
+  sexo: dados.sexo
+};
 
   } catch (error) {
     console.error('Erro na CONSULTA_URL:', error);
